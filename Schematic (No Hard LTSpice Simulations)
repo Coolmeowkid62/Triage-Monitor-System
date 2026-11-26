@@ -1,0 +1,72 @@
+<img src="images/schematic.png" alt="PPG prototype schematic" width="900">
+
+
+Microcontroller: ESP32C3-M1
+This contains GPI0 ports which are just inputs for the ESP32-C3-M1 Dev Kit
+It has a 5V input to the boards voltage regulator and a 3.3V output
+Therefore the voltage is stepped down from 5 to 3.3 V
+It also has a GND
+
+LEDs:
+The LEDs go from the +5 V supply through a series resistor (R1/R2/R3), which limits the LED current to about 20 mA, then through the LED itself. 
+From there, each LED connects to the collector of an NPN transistor (2N3904). The transistor acts as a low-side switch, controlled by a 3.3 V GPIO pin from the ESP32. 
+When the GPIO is HIGH (3.3 V), current flows through the 1 kΩ base resistor into the base, about 2.6mA. This turns the transistor fully on, so the ~20 mA LED current flows from collector to emitter to ground and the LED lights. 
+When the GPIO is LOW (0 V), no base current flows. The transistor turns off and the LED is off.
+The 10 kΩ pull-down resistor from base to ground holds the base at 0 V whenever the GPIO isn't actively driving it, such as during boot or reset. That keeps the LED from turning on by accident.
+
+Accelerometer (LIS3DH):
+A 3-axis accelerometer that measures motion so motion artifacts can be removed from the PPG signal, or segments flagged as unreliable. 
+Powered from 3.3 V: VCC → 3V3, GND → GND. 
+Communicates with the ESP32 over I2C:
+SDA → GPIO6: data line. 
+SCL → GPIO7: clock line from the ESP32. 
+SDO → GND sets the address to 0x18. 
+CS → 3V3 selects I2C mode.
+INT1 → GPIO4: tells the ESP32 when new data is ready, sampled at 100 Hz to match the PPG frames.
+
+Decoupling:
+Capacitors between each part's power pin and ground, placed close to the pin, keep the supply steady. They supply sudden current demands instantly and shunt high-frequency noise to ground. 
+Analogy: a decoupling capacitor is like a small water tank right next to a shower. When demand spikes, the tank covers it immediately so pressure doesn't drop. The distant main supply refills it afterward.
+C5 (10 µF): +5V at the LEDs. Supplies the ~20 mA LED pulses.
+C6 (100 nF): U1 pin 8. Keeps noise out of the TIA. 
+C7 (100 nF): U2 pin 14. Decouples the analog switch. 
+The ESP32 DevKit and LIS3DH breakout have their own decoupling on board.
+
+Photodiode + TIA:
+D4 (BPW34 photodiode) turns the light returning from the tissue into a small photocurrent, about 1–10 µA. Its anode goes to GND and its cathode to the op-amp's input.
+U1A (MCP6002 op-amp) is wired as a transimpedance amplifier (TIA), which converts the photocurrent into a voltage. It holds the photodiode's voltage constant, so the photodiode's ~70 pF capacitance doesn't slow the response and the signal settles within each ~100 µs LED slot while the voltage is still being altered through the feedback resistor (R7)
+C1 (Cf = 4.7 pF), across R7, keeps the op-amp from oscillating and filters high-frequency noise. It only acts above about 34 kHz, so the DC and AC (heartbeat) parts of the PPG signal pass through unaffected but it accounts for large noise.
+R8/C2 (150 kΩ / 33 pF) and S1 (74HC4066 analog switch) form the gain control. GAIN_SEL (GPIO0) drives the switch:
+Open: Rf=1M, high gain for weak signals.
+Closed: R8/C2 are added in parallel, giving Rf130k, low gain for strong signals so the output doesn't clip.
+R10/R11 (100 kΩ / 10 kΩ) and C4 (1 µF) set the + input to VREF0.30V, smoothed by C4. This keeps the output off the 0 V rail and slightly reverse-biases the photodiode.
+R9/C3 (100 Ω / 1 nF) isolates the op-amp from the ADC. C3 supplies the charge the ADC draws each time it samples, and R9 keeps the op-amp from directly driving a capacitor.
+The output, TIA_OUT, goes to GPIO3 (ADC1_CH3) on the ESP32.
+
+Sampling Scheme (TIme Multiplexing:
+One photodiode and one TIA are shared by all three LEDs, which take turns.
+Frame rate is 100 Hz (10 ms per frame). Each frame has four ~100 µs slots: green, red, IR, then all LEDs off. The rest of the frame is idle.
+TIA_OUT is sampled about 70–80 µs into each slot, once the TIA has settled. Each sample is stored in its own channel (green, red, IR, ambient).
+Ambient light cancellation: the all-off sample is subtracted from each LED sample in the same frame.
+
+ADC Range and Gain Control:
+The ESP32-C3 ADC at 12 dB attenuation reads about 0–2.5 V. 
+The target DC level is 1.25–1.75 V (50–70% of full scale), leaving headroom so motion doesn't cause clipping.
+High gain covers about 1–1.5 µA of DC photocurrent. Low gain covers about 7–11 µA.
+GAIN_SEL changes slowly, with hysteresis. It switches to low gain above 80% of full scale and back to high gain below 40%, and only after the level has stayed out of range for 1–2 s.
+GAIN_SEL changes slowly, with hysteresis. It switches to low gain above 80% of full scale and back to high gain below 40%, and only after the level has stayed out of range for 1–2 s. 
+The gain setting is logged with every sample, so the true AC and DC can be recovered for SpO2.
+Samples at the ADC limits are flagged as clipped and excluded. 
+
+
+Mechanical Design:
+Reflectance layout: LEDs and photodiodes on the same face, a few mm apart, with an opaque barrier between them.  
+Opaque housing and consistent contact pressure (strap or clip)
+
+Limitations:
+Known limitation: the AC (heartbeat) part is only about 0.5–2% of the DC level, and there is no DC subtraction or second gain stage before the ADC. The 12-bit ADC (≈ 0.61 mV per step) has to measure the full signal, DC included, so small changes in the AC fall through the cracks between steps and get rounded away (quantization error). Averaging several ADC readings per slot partly reduces this. The planned fix is an optical AFE (analog front-end) IC in the wearable version, which removes the DC and amplifies the AC before converting it.
+
+Questions:
+Is a 1 MHz GBW (gain-bandwidth) op-amp adequate, or is a faster TIA part needed?
+Is a two-step switched Rf a reasonable way to control TIA gain? 
+
